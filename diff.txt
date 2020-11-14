@@ -1,0 +1,208 @@
+diff --git a/examples/gpt-2/config_train.py b/examples/gpt-2/config_train.py
+index 22bc418..13d92e6 100644
+--- a/examples/gpt-2/config_train.py
++++ b/examples/gpt-2/config_train.py
+@@ -1,17 +1,19 @@
+ """Config file for GPT2 training.
+ """
+ 
+-pickle_data_dir = "data/toy"
++pickle_data_dir = "data/webtext"
+ max_seq_length = 128
+ max_decoding_length = max_seq_length
+ 
+-train_batch_size = 32
++# train_batch_size = 32
++train_batch_size = 1
++
+ max_train_epoch = 100
+ display_steps = 1  # Print training loss every display_steps; -1 to disable
+ eval_steps = 1  # Eval on the dev set every eval_steps; -1 to disable
+ 
+-eval_batch_size = 8
+-test_batch_size = 8
++eval_batch_size = 1 # orginal 8
++test_batch_size = 1 # orginal 8
+ 
+ # Optimization configs
+ 
+@@ -42,6 +44,7 @@ train_hparam = {
+         "data_name": "data",
+         "feature_types": feature_types,
+         "files": "{}/train.pkl".format(pickle_data_dir)
++# "files": "{}/train.txt".format(pickle_data_dir)
+     },
+     "shuffle": True,
+     "shuffle_buffer_size": 10000
+diff --git a/examples/gpt-2/gpt2_generate_main.py b/examples/gpt-2/gpt2_generate_main.py
+index 816affd..cf5c39d 100644
+--- a/examples/gpt-2/gpt2_generate_main.py
++++ b/examples/gpt-2/gpt2_generate_main.py
+@@ -21,7 +21,7 @@ import numpy as np
+ import torch
+ import texar.torch as tx
+ 
+-
++cache_dir = 'gpt2_save'
+ parser = argparse.ArgumentParser()
+ parser.add_argument(
+     '--checkpoint', type=str, default=None,
+@@ -72,7 +72,7 @@ def main() -> None:
+     max_decoding_length = args.max_decoding_length
+ 
+     # Build the GPT-2 model
+-    model = tx.modules.GPT2Decoder(args.pretrained_model_name)
++    model = tx.modules.GPT2Decoder(args.pretrained_model_name,cache_dir)
+     if args.checkpoint:
+         ckpt = torch.load(args.checkpoint)
+         model.load_state_dict(ckpt['model'])
+@@ -89,6 +89,7 @@ def main() -> None:
+ 
+     print("\nFinished loading\n")
+ 
++    # Top p or top k sampling
+     def _get_helper(start_tokens):
+         if args.top_p:
+             helper = tx.modules.TopPSampleEmbeddingHelper(
+@@ -149,17 +150,21 @@ def main() -> None:
+     else:
+         # Generate samples from scratch
+         start_tokens = torch.full(
+-            (batch_size,), end_token, dtype=torch.int64, device=device)
++            (batch_size,), end_token, dtype=torch.int64, device=device) # 一开始先用end-token 填充
++
++        print('start token\n',start_tokens)
++        print('end token',end_token)
+ 
+         generated = 0
+         while nsamples == 0 or generated < nsamples:
+ 
+             helper = _get_helper(start_tokens)
+-
++            print('helper',helper)
+             output, _ = model(
+                 max_decoding_length=max_decoding_length,
+                 helper=helper)
+             sample_id = output.sample_id
++            print('sample_id',sample_id)
+             for i in range(batch_size):
+                 generated += batch_size
+                 text = tokenizer.map_id_to_text(sample_id[i].tolist())
+diff --git a/examples/gpt-2/gpt2_train_main.py b/examples/gpt-2/gpt2_train_main.py
+index c35df98..c3765ac 100644
+--- a/examples/gpt-2/gpt2_train_main.py
++++ b/examples/gpt-2/gpt2_train_main.py
+@@ -30,8 +30,12 @@ parser.add_argument(
+     "--pretrained-model-name", type=str, default="gpt2-small",
+     choices=tx.modules.GPT2Decoder.available_checkpoints(),
+     help="Name of the pre-trained checkpoint to load.")
++# parser.add_argument(
++#     '--config-train',type=str, default="config_train",
++#     help="Configurations of GPT-2 training, including data and "
++#          "optimization hyperparameters.")
+ parser.add_argument(
+-    '--config-train', type=str, default="config_train",
++    '--config-train', action="store_true",
+     help="Configurations of GPT-2 training, including data and "
+          "optimization hyperparameters.")
+ parser.add_argument(
+@@ -60,7 +64,8 @@ parser.add_argument(
+ 
+ args = parser.parse_args()
+ 
+-config_train: Any = importlib.import_module(args.config_train)
++# config_train: Any = importlib.import_module(args.config_train)
++# print(config_train)
+ 
+ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ 
+@@ -71,7 +76,8 @@ def main() -> None:
+     """
+     tx.utils.maybe_create_dir(args.output_dir)
+ 
+-    max_decoding_length = config_train.max_decoding_length
++    # max_decoding_length = config_train.max_decoding_length
++    max_decoding_length = 128
+ 
+     # Build the GPT-2 model
+     model = tx.modules.GPT2Decoder(args.pretrained_model_name)
+@@ -98,15 +104,45 @@ def main() -> None:
+         eval_dataset = tx.data.RecordData(
+             hparams=config_train.eval_hparam, device=device)
+         datasets['eval'] = eval_dataset
++
++    pickle_data_dir = "data/webtext"
++    max_seq_length = 128
++    feature_types = {
++        "text_ids": ["int64", "stacked_tensor", max_seq_length],
++        "length": ["int64", "stacked_tensor"]
++    }
++    test_hparam = {
++        "allow_smaller_final_batch": True,
++        "batch_size": 1,
++        "dataset": {
++            "data_name": "data",
++            "feature_types": feature_types,
++            "files": "{}/test.pkl".format(pickle_data_dir)
++        },
++        "shuffle": False
++    }
+     if args.do_test:
+         test_dataset = tx.data.RecordData(
+-            hparams=config_train.test_hparam, device=device)
++            hparams=test_hparam, device=device)
+         datasets['test'] = test_dataset
+     iterator = tx.data.DataIterator(datasets)
+ 
+     # For training
++    # Optimization configs
++
++    opt = {
++        'optimizer': {
++            'type': 'Adam',
++            'kwargs': {
++                'lr': 0.001
++            }
++        }
++    }
++
++    # train_op = tx.core.get_train_op(
++    #     params=model.parameters(), hparams=config_train.opt)
+     train_op = tx.core.get_train_op(
+-        params=model.parameters(), hparams=config_train.opt)
++        params=model.parameters(), hparams=opt)
+ 
+     end_token = tokenizer.map_token_to_id('<|endoftext|>')
+ 
+@@ -125,8 +161,8 @@ def main() -> None:
+                 softmax_temperature=args.temperature)
+         return helper
+ 
+-    dis_steps = config_train.display_steps
+-    eval_steps = config_train.eval_steps
++    # dis_steps = config_train.display_steps
++    # eval_steps = config_train.eval_steps
+ 
+     eval_best = {"loss": 1e8, "ppl": 1e8}
+ 
+@@ -183,6 +219,7 @@ def main() -> None:
+                 sum_over_timesteps=False)
+             ppl = torch.exp(loss)
+             batch_size = input_ids.size()[0]
++            # print('batch_size',batch_size)
+             avg_rec.add([loss, ppl], batch_size)
+             nsamples += batch_size
+ 
+diff --git a/examples/gpt-2/prepare_data.py b/examples/gpt-2/prepare_data.py
+index dae3eda..cd614b1 100644
+--- a/examples/gpt-2/prepare_data.py
++++ b/examples/gpt-2/prepare_data.py
+@@ -24,7 +24,7 @@ from utils import data_utils
+ 
+ parser = argparse.ArgumentParser()
+ parser.add_argument(
+-    '--data-dir', type=str, default='data/toy',
++    '--data-dir', type=str, default='data/webtext',
+     help="The directory of raw data, wherein data files must be named as "
+          "'train.txt', 'dev.txt', or 'test.txt'.")
+ parser.add_argument(
