@@ -25,7 +25,6 @@ parser.add_argument(
     '--config-train',type=str, default="config_train",
     help="Configurations of GPT-2 training, including data and "
          "optimization hyperparameters.")
-         
 # parser.add_argument(
 #     '--config-train', action="store_true",
 #     help="Configurations of GPT-2 training, including data and "
@@ -57,7 +56,6 @@ parser.add_argument(
 args = parser.parse_args()
 
 config_train: Any = importlib.import_module(args.config_train)
-# print(config_train)
 torch.cuda.set_device(0)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -71,6 +69,7 @@ def main() -> None:
     """
     tx.utils.maybe_create_dir(args.output_dir)
 
+    # parameters setting from config_train.py
     max_decoding_length = config_train.max_decoding_length
     vocab_size = config_train.vocab_size
     window_size = config_train.window_size
@@ -80,7 +79,7 @@ def main() -> None:
     # Build the GPT-2
     # tx.cuda.empty_cache()
     # model = tx.modules.GPT2Decoder(args.pretrained_model_name)
-    model = tx.modules.GPT2Decoder()
+    model = tx.modules.GPT2Decoder() # Not use the pretrained weights.
     
     # if args.checkpoint:
     #     ckpt = torch.load(args.checkpoint)
@@ -134,8 +133,6 @@ def main() -> None:
 
     dis_steps = config_train.display_steps
     eval_steps = config_train.eval_steps
-    #
-    # eval_best = {"loss": 1e8, "ppl": 1e8}
     eval_best = {"loss": 1e8}
 
     def _train_epoch():
@@ -151,41 +148,55 @@ def main() -> None:
             part_input_ids = []
             for sample in all_input_ids:
                 sample = sample.tolist()
+
+                # Calculate the sequence length without specitial tokens.
                 sample = list(set(sample).difference(set([vocab_size - 1])))
                 seq_length = len(sample)
+                
+                # Traverse the whole senquence through window slip.
                 for i in range(seq_length):
                     if i + window_size <= seq_length:
                         all_ngram = []
                         pos_ngram = sample[i:i + window_size]
-                        random_position = random.randint(0,window_size - 1)  # We will replace one word randomly. If we want to replace two or more words, need to modify the code.
+
+                        # Create negative samples based on the original samples.
                         for k in range(num_neg):
+                            random_position = random.randint(0,window_size - 1)  # We will replace one word randomly. If we want to replace two or more words, need to modify the code.
                             rand_word = random.randint(2, vocab_size - 1)
                             pre_gram = sample[i:i + random_position] + sample[i + random_position + 1:i + window_size]  # need to check/
                             pre_gram.insert(random_position,rand_word)  # It's now a negative sample.
                             all_ngram.append(pre_gram)
                         all_ngram.insert(0,pos_ngram)  # e.g. 1-pos, 10-neg
-                    part_input_ids.append(all_ngram)  # (all_phrase, num_samples, window_size)
+                    part_input_ids.append(all_ngram)  # (all_partitions, num_samples, window_size)
             part_input_ids = torch.tensor(part_input_ids)
 
             all_partitions, num_sample, _ = list(part_input_ids.size())
-            # Tensor flatten --> (all_phrases*num_samples, window_size)
+            # Tensor flatten --> (all_partitions*num_samples, window_size)
+            # Let all_partitions*num_samples=all_samples.
             part_input_ids = torch.flatten(part_input_ids,end_dim=-2)
             part_input_ids = part_input_ids.to(device)
+
+            # Generate outputs.
             outputs = model(inputs=part_input_ids, decoding_strategy='train_greedy')
             logits = (outputs.logits).to(device)
-            # logits -- (all_samples, 3, 2); ngram_logits -- (all_samples, 1, 2)
-            ngram_logits = torch.mean(logits,dim=1,keepdim=True) # Choose the last token (but not EOS token) representation to classify.
-            ngram_logits = torch.flatten(ngram_logits,end_dim=-1).to(device)
+            # logits --> (all_samples, 3, 1); ngram_logits --> (all_samples, 1, 1)
+            ngram_logits = torch.mean(logits,dim=1,keepdim=True) # Choose the mean representation of n-grams to classify.
+            ngram_logits = torch.flatten(ngram_logits,end_dim=-1).to(device) # ngram_logits --> (all_samples, 1)
+
+            # Get the ground truth labels to compute loss and accuracy.
             true_labels = torch.tensor([[1]+[0]*num_neg for i in range(all_partitions)],dtype=torch.float32)
-            true_labels = torch.flatten(true_labels, end_dim=-1).to(device)
-             
+            true_labels = torch.flatten(true_labels, end_dim=-1).to(device) # Same shape as ngram_logits
+            
+            # Calculate loss through Binary Cross Entropy.
             cal_loss = nn.BCEWithLogitsLoss().to(device)
             loss = cal_loss(ngram_logits,true_labels)
-            # Compute accuracy 
+
+            # Compute accuracy by counting the number of matches. 
+            # Get the predition labels by take the sigmoid function over the ngram logits.
             sigmoid = nn.Sigmoid()
             pred = sigmoid(ngram_logits)
             pred_labels = torch.tensor((pred>0.5)*1).to(device)
-            print(pred_labels)
+
             accu = calc_accuracy(pred_labels,true_labels,all_partitions*num_sample)
 
             loss.backward()
@@ -211,6 +222,8 @@ def main() -> None:
         avg_rec = tx.utils.AverageRecorder()
         accu = 0
         step = 0 
+
+        """Same approches as training part."""
         for batch in iterator:
             all_input_ids = batch["text_ids"]
 
@@ -222,9 +235,9 @@ def main() -> None:
                 for i in range(seq_length):
                     if i + window_size <= seq_length:
                         pos_ngram = sample[i:i + window_size]
-                        random_position = random.randint(0,window_size - 1)  # We will replace one word randomly. If we want to replace two or more words, need to modify the code.
                         all_ngram = []  # Store all the ngrams for each sequence.
                         for k in range(num_neg):
+                            random_position = random.randint(0,window_size - 1) 
                             rand_word = random.randint(2, vocab_size - 1)
                             pre_gram = sample[i:i + random_position] + sample[i + random_position + 1:i + window_size]  # need to check
                             pre_gram.insert(random_position,rand_word)  # It's now a negative sample.
@@ -247,12 +260,11 @@ def main() -> None:
              
             cal_loss = nn.BCEWithLogitsLoss().to(device)
             loss = cal_loss(ngram_logits,true_labels)
-            # accu += calc_accuracy(pred_labels,true_labels,all_partitions*num_sample)
             nsamples += all_partitions*num_sample
             step +=1 
             avg_rec.add([loss],all_partitions)
 
-        print("eval loss:%.4f, eval nsamples:%d"%(avg_rec.avg(0), nsamples)) # may have some problems
+        print("eval loss:%.4f, eval nsamples:%d"%(avg_rec.avg(0), nsamples)) 
 
         if args.do_train and avg_rec.avg(0) < eval_best["loss"]:
             eval_best["loss"] = avg_rec.avg(0)
@@ -263,7 +275,7 @@ def main() -> None:
 
     @torch.no_grad()
     def _test_epoch():
-        r"""Generates samples on the test set.
+        r"""Generates samples on the test set. Have not changed this part.
         """
         iterator.switch_to_dataset("test")
         model.eval()
@@ -339,10 +351,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    
-    
-    
-    
-    
-    
-    
