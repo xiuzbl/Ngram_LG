@@ -11,7 +11,7 @@ import torch
 import texar.torch as tx
 import torch.nn as nn
 import numpy as np
-import f1_score as F1
+from f1_score import f1_loss as F1
 
 
 parser = argparse.ArgumentParser()
@@ -55,10 +55,9 @@ parser.add_argument(
     help="Whether to run test on the test set.")
 
 args = parser.parse_args()
-
 config_train: Any = importlib.import_module(args.config_train)
-torch.cuda.set_device(0)
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+torch.cuda.set_device(7)
+device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 
 def calc_accuracy(pred,true,num_items):
 	accu = (pred==true).sum(dtype=torch.float32)/num_items
@@ -182,7 +181,7 @@ def main() -> None:
             # # Get the ground truth labels to compute loss and accuracy.
             true_labels = torch.tensor([[1]+[0]*num_neg for i in range(all_partitions)],dtype=torch.float32)
             true_labels = torch.flatten(true_labels, end_dim=-1).to(device) # shape (all_samples,1)
-            true_labels_tocat = true_labels[:,None] # Add one dimension so that can concatenate with input data. 
+            true_labels_tocat =torch.tensor(true_labels[:,None],dtype=torch.long).to(device) # Add one dimension so that can concatenate with input data. 
 
             # Add shuffling
             cat = torch.cat((input_ids,true_labels_tocat),dim=1) # Concatenate data and their labels (all_samples, window_size+1)
@@ -190,9 +189,9 @@ def main() -> None:
             shuffled_idx = torch.randperm(all_samples)
             shuffled_cat = cat[shuffled_idx] # Shuffle lines based on their index.
             new_input_ids = shuffled_cat[:,:window_size] # new_input_ids -- (all_samples, window_size)
-            new_true_labels = shuffled_cat[:,-1] # new_true_labels -- (all_samples, 1)
-            new_input_ids,new_true_labels = new_input_ids.to(device), new_true_labels.to(device)
+            new_true_labels =torch.tensor(shuffled_cat[:,-1],dtype=torch.long) # new_true_labels -- (all_samples, 1)
             new_input_ids = torch.tensor(new_input_ids,dtype=torch.long)
+            new_input_ids,new_true_labels = new_input_ids.to(device), new_true_labels.to(device)
 
             # Generate outputs.
             outputs = model(inputs=new_input_ids, decoding_strategy='train_greedy')
@@ -203,6 +202,7 @@ def main() -> None:
 
             # Calculate loss through Binary Cross Entropy.
             cal_loss = nn.BCEWithLogitsLoss().to(device)
+            new_true_labels = torch.tensor(new_true_labels, dtype=torch.float32).to(device)
             loss = cal_loss(ngram_logits,new_true_labels)
 
             # Compute accuracy by counting the number of matches. 
@@ -286,7 +286,7 @@ def main() -> None:
             pred_labels = torch.tensor((pred>0.5)*1).to(device)
 
             accu = calc_accuracy(pred_labels,true_labels,all_samples)
-            F1_score = F1(new_true_labels,pred_labels)
+            F1_score = F1(true_labels,pred_labels)
 
             avg_rec.add([loss,accu,F1_score],all_samples)
 
