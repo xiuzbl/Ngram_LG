@@ -11,6 +11,7 @@ import torch
 import texar.torch as tx
 import torch.nn as nn
 import numpy as np
+import f1_score as F1
 
 
 parser = argparse.ArgumentParser()
@@ -173,23 +174,35 @@ def main() -> None:
             all_partitions, num_sample, _ = list(part_input_ids.size())
             # Tensor flatten --> (all_partitions*num_samples, window_size)
             # Let all_partitions*num_samples=all_samples.
+            all_samples = all_partitions * num_sample # Get the new batch_size.
             part_input_ids = torch.flatten(part_input_ids,end_dim=-2)
-            part_input_ids = part_input_ids.to(device)
+            input_ids = part_input_ids.to(device) 
+            # input_ids -- (all_samples,window_size)
+            
+            # # Get the ground truth labels to compute loss and accuracy.
+            true_labels = torch.tensor([[1]+[0]*num_neg for i in range(all_partitions)],dtype=torch.float32)
+            true_labels = torch.flatten(true_labels, end_dim=-1).to(device) # shape (all_samples,1)
+
+            # Add shuffling
+            cat = torch.cat(input_ids,true_labels,dim=1) # Concatenate data and their labels (all_samples, window_size+1)
+            print("After concatenation:",cat.size)
+            shuffled_idx = torch.randperm(all_samples,requires_grad=True)
+            shuffled_cat = cat.view(-1)[shuffled_idx].view(cat.size()) # Shuffle lines based on their index.
+            
+            new_input_ids = shuffled_cat[:,:window_size] # new_input_ids -- (all_samples, window_size)
+            new_true_labels = shuffled_cat[:,-1] # new_true_labels -- (all_samples, 1)
+
 
             # Generate outputs.
-            outputs = model(inputs=part_input_ids, decoding_strategy='train_greedy')
+            outputs = model(inputs=new_input_ids, decoding_strategy='train_greedy')
             logits = (outputs.logits).to(device)
             # logits --> (all_samples, 3, 1); ngram_logits --> (all_samples, 1, 1)
             ngram_logits = torch.mean(logits,dim=1,keepdim=True) # Choose the mean representation of n-grams to classify.
             ngram_logits = torch.flatten(ngram_logits,end_dim=-1).to(device) # ngram_logits --> (all_samples, 1)
 
-            # Get the ground truth labels to compute loss and accuracy.
-            true_labels = torch.tensor([[1]+[0]*num_neg for i in range(all_partitions)],dtype=torch.float32)
-            true_labels = torch.flatten(true_labels, end_dim=-1).to(device) # Same shape as ngram_logits
-            
             # Calculate loss through Binary Cross Entropy.
             cal_loss = nn.BCEWithLogitsLoss().to(device)
-            loss = cal_loss(ngram_logits,true_labels)
+            loss = cal_loss(ngram_logits,new_true_labels)
 
             # Compute accuracy by counting the number of matches. 
             # Get the predition labels by take the sigmoid function over the ngram logits.
@@ -197,13 +210,14 @@ def main() -> None:
             pred = sigmoid(ngram_logits)
             pred_labels = torch.tensor((pred>0.5)*1).to(device)
 
-            accu = calc_accuracy(pred_labels,true_labels,all_partitions*num_sample)
+            accu = calc_accuracy(pred_labels,new_true_labels,all_samples)
+            F1_score = F1(new_true_labels,pred_labels)
 
             loss.backward()
             train_op()
 
             if dis_steps > 0 and step % dis_steps == 0:
-                print("step=%d, loss=%.4f, accuracy=%.4f"%(step, loss, accu))
+                print("step=%d, loss=%.4f, accuracy=%.4f, F1-score=%.4f"%(step, loss, accu,F1_score))
 
             if eval_steps > 0 and step % eval_steps == 0:
                 _eval_epoch()
@@ -221,7 +235,7 @@ def main() -> None:
         nsamples = 0
         avg_rec = tx.utils.AverageRecorder()
         accu = 0
-        step = 0 
+        # step = 0 
 
         """Same approches as training part."""
         for batch in iterator:
@@ -248,8 +262,11 @@ def main() -> None:
 
             all_partitions, num_sample, _ = list(part_input_ids.size())
             part_input_ids = torch.flatten(part_input_ids,end_dim=-2)
-            part_input_ids = part_input_ids.to(device)
-            outputs = model(inputs=part_input_ids, decoding_strategy='train_greedy')
+            input_ids = part_input_ids.to(device)
+            all_samples = all_partitions*num_sample # Get the new batch size.
+
+            # Feed into the model.
+            outputs = model(inputs=input_ids, decoding_strategy='train_greedy')
             logits = (outputs.logits).to(device)
 
             ngram_logits = torch.mean(logits,dim=1,keepdim=True) # Choose the last token (but not EOS token) representation to classify.
@@ -260,11 +277,20 @@ def main() -> None:
              
             cal_loss = nn.BCEWithLogitsLoss().to(device)
             loss = cal_loss(ngram_logits,true_labels)
-            nsamples += all_partitions*num_sample
-            step +=1 
-            avg_rec.add([loss],all_partitions)
+            nsamples += all_samples
+            
+            # Get predicted labels.
+            sigmoid = nn.Sigmoid()
+            pred = sigmoid(ngram_logits)
+            pred_labels = torch.tensor((pred>0.5)*1).to(device)
 
-        print("eval loss:%.4f, eval nsamples:%d"%(avg_rec.avg(0), nsamples)) 
+            accu = calc_accuracy(pred_labels,true_labels,all_samples)
+            F1_score = F1(new_true_labels,pred_labels)
+
+            avg_rec.add([loss,accu,F1_score],all_samples)
+
+        print('*'*60)
+        print("Evaluation loss:%.4f, accuracy:%.4f, F1-score:%.4f, nsamples:%d"%(avg_rec.avg(0),avg_rec.avg(1),avg_rec.avg(2),nsamples)) 
 
         if args.do_train and avg_rec.avg(0) < eval_best["loss"]:
             eval_best["loss"] = avg_rec.avg(0)
