@@ -92,10 +92,10 @@ class GPT2Decoder(PretrainedGPT2Mixin):
             def __init__(self):
                 super(FNN,self).__init__()
                 self.fnn = nn.Linear(768,256)
-                self.relu = nn.LeakyReLU()
+                self.tanh = nn.Tanh()
                 self.fnn2 = nn.Linear(256,1)
             def forward(self,x):
-                x = self.relu(self.fnn(x))
+                x = self.tanh(self.fnn(x))
                 return self.fnn2(x)
 
         # This part can add modified inputs.
