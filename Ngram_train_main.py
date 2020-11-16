@@ -182,16 +182,17 @@ def main() -> None:
             # # Get the ground truth labels to compute loss and accuracy.
             true_labels = torch.tensor([[1]+[0]*num_neg for i in range(all_partitions)],dtype=torch.float32)
             true_labels = torch.flatten(true_labels, end_dim=-1).to(device) # shape (all_samples,1)
+            true_labels_tocat = true_labels[:,None] # Add one dimension so that can concatenate with input data. 
 
             # Add shuffling
-            cat = torch.cat(input_ids,true_labels,dim=1) # Concatenate data and their labels (all_samples, window_size+1)
-            print("After concatenation:",cat.size)
-            shuffled_idx = torch.randperm(all_samples,requires_grad=True)
-            shuffled_cat = cat.view(-1)[shuffled_idx].view(cat.size()) # Shuffle lines based on their index.
-            
+            cat = torch.cat((input_ids,true_labels_tocat),dim=1) # Concatenate data and their labels (all_samples, window_size+1)
+            # print("After concatenation:",cat.size())
+            shuffled_idx = torch.randperm(all_samples)
+            shuffled_cat = cat[shuffled_idx] # Shuffle lines based on their index.
             new_input_ids = shuffled_cat[:,:window_size] # new_input_ids -- (all_samples, window_size)
             new_true_labels = shuffled_cat[:,-1] # new_true_labels -- (all_samples, 1)
-
+            new_input_ids,new_true_labels = new_input_ids.to(device), new_true_labels.to(device)
+            new_input_ids = torch.tensor(new_input_ids,dtype=torch.long)
 
             # Generate outputs.
             outputs = model(inputs=new_input_ids, decoding_strategy='train_greedy')
