@@ -60,8 +60,8 @@ parser.add_argument(
 
 args = parser.parse_args()
 config_train: Any = importlib.import_module(args.config_train)
-torch.cuda.set_device(5)
-device = torch.device("cuda:5" if torch.cuda.is_available() else "cpu")
+torch.cuda.set_device(3)
+device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 
 def calc_accuracy(pred,true,num_items):
 	accu = (pred==true).sum(dtype=torch.float32)/num_items
@@ -85,9 +85,11 @@ def main() -> None:
     # model = tx.modules.GPT2Decoder(args.pretrained_model_name)
     model = tx.modules.GPT2Decoder() # Not use the pretrained weights.
     
-    # if args.checkpoint:
-    #     ckpt = torch.load(args.checkpoint)
-    #     model.load_state_dict(ckpt['model'])
+    if args.checkpoint:
+        ckpt = torch.load(args.checkpoint)
+        model.load_state_dict(ckpt)
+
+  
     # print(model.state_dict().keys())
     # print(model.parameters)
     model.to(device)
@@ -113,7 +115,7 @@ def main() -> None:
 
     if args.do_test:
         test_dataset = tx.data.RecordData(
-            hparams=test_hparam, device=device)
+            hparams=config_train.test_hparam, device=device)
         datasets['test'] = test_dataset
     iterator = tx.data.DataIterator(datasets)
     train_op = tx.core.get_train_op(
@@ -329,59 +331,39 @@ def main() -> None:
 
         _all_inputs = []
         _all_samples = []
+        avg_rec = tx.utils.AverageRecorder()
 
         for batch in iterator:
-            input_ids = batch["text_ids"]
-            length = batch["length"]
-            start_tokens = input_ids[:, 0]
-            helper = _get_helper(start_tokens)
+            all_input_ids = batch["text_ids"]
+            part_input_ids = []
+            for sample in all_input_ids:
+                sample = sample.tolist() 
+                sample = list(set(sample).difference(set([vocab_size-1])))
+                seq_length = len(sample)
+                
+                for i in range(seq_length):
+                    if i + window_size<=seq_length:
+                        pos_ngram = sample[i:i+window_size]
+                        part_input_ids.append(pos_ngram)
+            part_input_ids = torch.tensor(part_input_ids).to(device) # (all_pos, window_size)
+            all_pos, _ = list(part_input_ids.size()) 
+            
+            true_labels = torch.tensor([1 for i in range(all_pos)],dtype=torch.float32).to(device)
+            outputs = model(inputs=part_input_ids,decoding_strategy='train_greedy')
+            logits = (outputs.logits).to(device)
+            ngram_logits = torch.mean(logits,dim=1,keepdim=True)
+            ngram_logits = torch.flatten(ngram_logits,end_dim=-1).to(device)
+            
+            sigmoid = nn.Sigmoid()
+            pred = sigmoid(ngram_logits)
+            pred_labels = torch.tensor((pred>0.5)*1).to(device)
 
-            output, _ = model(
-                context=input_ids,
-                context_sequence_length=length,
-                max_decoding_length=max_decoding_length,
-                helper=helper)
-            sample_id = output.sample_id
-
-            _inputs = []
-            for i, l in zip(input_ids, length):
-                # Delete padding
-                _inputs.append(i[:l].tolist())
-            _all_inputs.extend(_inputs)
-
-            _samples = []
-            for s, l in zip(sample_id, length):
-                # Delte inputs from samples
-                _samples.append(s[l:].tolist())
-            _all_samples.extend(_samples)
-
-        # Parse samples and write to file
-
-        eos_token_id = tokenizer.map_token_to_id('<|endoftext|>')
-
-        _all_input_text = []
-        for i in _all_inputs:
-            if i[0] == eos_token_id:
-                # '<|endoftext|>' is used as the BOS token. Delete it here
-                i = i[1:]
-            i_text = tokenizer.map_id_to_text(i)
-            _all_input_text.append(i_text)
-        # '<|endoftext|>' is used as the PAD token. Delete them here
-        _all_input_text = tx.utils.strip_eos(_all_input_text,
-                                             eos_token='<|endoftext|>')
-
-        _all_samples_text = []
-        for i, s in zip(_all_inputs, _all_samples):
-            s_text = tokenizer.map_id_to_text(s)
-            s_text = s_text.replace('\n', ' ')
-            _all_samples_text.append(s_text)
-        _all_samples_text = tx.utils.strip_eos(_all_samples_text,
-                                               eos_token='<|endoftext|>')
-
-        output_file = os.path.join(args.output_dir, "test_samples.tsv")
-        print('Write samples to {}'.format(output_file))
-        tx.utils.write_paired_text(
-            _all_input_text, _all_samples_text, output_file)
+            accu = calc_accuracy(pred_labels,true_labels,all_pos)
+            F1_score = F1(true_labels,pred_labels)
+            avg_rec.add([accu, F1_score],all_pos)
+            
+        print("Test accuracy:%.4f, F1-score:%.4f"%(avg_rec.avg(0),avg_rec.avg(1))) 
+        sys.stdout.flush()
 
     if args.do_train:
         for _ in range(config_train.max_train_epoch):
