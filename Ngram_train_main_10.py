@@ -60,9 +60,9 @@ parser.add_argument(
 
 args = parser.parse_args()
 config_train: Any = importlib.import_module(args.config_train)
-torch.cuda.set_device(4)
-device = torch.device("cuda:4" if torch.cuda.is_available() else "cpu")
-
+torch.cuda.set_device(3)
+device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+f = open('ngram_score.txt','w')
 def calc_accuracy(pred,true,num_items):
 	accu = (pred==true).sum(dtype=torch.float32)/num_items
 	return accu
@@ -364,7 +364,8 @@ def main() -> None:
 
             # TODO: classify ngrams based on their sigmoid scores.
             for k in range(all_pos):
-                text_ngram = tokenizer.map_id_to_text(part_input_ids[k])
+                ids_ngram = (part_input_ids[k,:]).tolist()
+                text_ngram = tokenizer.map_id_to_text(ids_ngram)
                 if pred[k]>=0.8:
                     high_ngram.append(text_ngram)
                 elif pred[k]>=0.4 and pred[k]<=0.6:
@@ -376,10 +377,10 @@ def main() -> None:
             accu = calc_accuracy(pred_labels,true_labels,all_pos)
             F1_score = F1(true_labels,pred_labels)
             avg_rec.add([accu, F1_score],all_pos)
-
-        print('ngram with high score',high_ngram,flush=True)
-        print('ngram with middle score',mid_ngram,flush=True)
-        print('ngram with small score',small_ngram,flush=True)    
+        high_ngram, mid_ngram, small_ngram = '\t'.join(high_ngram), '\t'.join(mid_ngram), '\t'.join(small_ngram)
+        print('ngram with high score:\n',high_ngram,'\n',file=f)
+        print('ngram with middle score:\n',mid_ngram,'\n',file=f)
+        print('ngram with small score:\n',small_ngram,'\n',file=f)    
         print("Test accuracy:%.4f, F1-score:%.4f"%(avg_rec.avg(0),avg_rec.avg(1))) 
         sys.stdout.flush()
 
